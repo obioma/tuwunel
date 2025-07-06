@@ -1,0 +1,525 @@
+# Migrating Synapse Admin to Tuwunel
+
+This document outlines the steps required to adapt the Synapse Admin UI to work with Tuwunel, an alternative Matrix homeserver implementation.
+
+## Table of Contents
+1. [Overview](#overview)
+2. [Tuwunel Adaptations](#tuwunel-adaptations)
+3. [Admin UI Modifications](#admin-ui-modifications)
+4. [Configuration Changes](#configuration-changes)
+5. [Testing Strategy](#testing-strategy)
+6. [Deployment](#deployment)
+
+## Overview
+
+Synapse Admin is designed to work with Synapse's Admin API. To make it compatible with Tuwunel, we need to:
+1. Ensure Tuwunel implements compatible Admin API endpoints
+2. Modify the Admin UI to work with Tuwunel's API responses
+3. Update authentication and configuration
+
+## Tuwunel Adaptations
+
+### Admin Functionality Comparison
+
+Tuwunel implements admin functionality differently from Synapse's REST API approach. Here's a comparison of how admin features are implemented in both systems:
+
+#### 1. Access Method
+- **Synapse**: Uses RESTful HTTP API endpoints under `/_synapse/admin/v1/`
+- **Tuwunel**: Uses Matrix room commands in the `#admins` room
+
+#### 2. User Management
+
+| Feature | Synapse API | Tuwunel Equivalent | Notes |
+|---------|-------------|---------------------|-------|
+| **List Users** | `GET /_synapse/admin/v2/users`<br>Parameters: <br>- `from`: Pagination start<br>- `limit`: Max users to return<br>- `guests`: Include guest users<br>- `deactivated`: Include deactivated users<br>- `name`: Search by name/localpart | `!admin users list [--deactivated]` | **Tuwunel Enhancement Opportunities**:<br>- Add pagination support (`--from`, `--limit`)<br>- Add guest user filtering (`--include-guests`)<br>- Add search functionality |
+| **View User** | `GET /_synapse/admin/v2/users/{userId}`<br>Returns: <br>- User ID and localpart<br>- Display name<br>- Avatar URL<br>- Admin status<br>- Deactivated status<br>- Shadow-banned status<br>- User type (support, bot, etc.)<br>- Creation timestamp (ms)<br>- Password hash details<br>- ThreepIDs (email/phone)<br>- External IDs (from identity servers) | `!admin users show @user:domain` | **Tuwunel Enhancement Opportunities**:<br>- Add detailed device information<br>- Include session information<br>- Add last seen timestamp<br>- Include IP information |
+| **Create User** | `PUT /_synapse/admin/v2/users/{userId}`<br>Body Parameters:<br>- `password`: User's password (optional for SSO/appservice)<br>- `admin`: Whether user is admin<br>- `deactivated`: Create as deactivated<br>- `user_type`: Type of user (support, bot, etc.)<br>- `displayname`: Initial display name<br>- `threepids`: [{"medium":"email", "address":"user@example.com"}]<br>OR for appservice users:<br>- `auth`: `{ "type": "m.login.application_service" }` | `!admin users create @user:domain [password] [--admin] [--deactivated] [--displayname=NAME]` | **Authentication Types**:<br>- Password-based: Requires password field<br>- Appservice: Uses auth.type="m.login.application_service"<br>- SSO: Requires external auth setup |
+| **Update User** | `PUT /_synapse/admin/v2/users/{userId}`<br>Body: `{ "displayname": "...", "admin": bool }` | `!admin users set @user:domain displayname "New Name"` | Tuwunel uses separate commands for different attributes |
+| **Deactivate User** | `POST /_synapse/admin/v1/deactivate/{userId}`<br>Body: `{ "erase": bool }` | `!admin users deactivate @user:domain [--erase]` | Both support optional message history erasure |
+| **Reset Password** | `POST /_synapse/admin/v1/reset_password/{userId}`<br>Body: `{ "new_password": "...", "logout_devices": bool }` | `!admin users password @user:domain newpassword [--no-logout]` | Both support optional device session invalidation |
+| **User Login** | N/A (Handled by client) | `!admin users login @user:domain [device_id]` | Tuwunel allows admin-issued login tokens |
+
+##### Detailed Comparison:
+
+**User Creation**
+- **Synapse**:
+  - Requires explicit authentication details
+  - Supports different authentication types (password, SSO, application service)
+  - Can set admin status during creation
+  - Returns 400 if user already exists
+  - Example:
+    ```http
+    PUT /_synapse/admin/v2/users/@newuser:example.com
+    {
+      "password": "s3cr3t",
+      "admin": false,
+      "displayname": "New User"
+    }
+    ```
+
+- **Tuwunel**:
+  - Simpler command-based interface
+  - Password is optional (can be set later)
+  - Admin flag can be set with `--admin`
+  - Example:
+    ```
+    !admin users create @newuser:example.com s3cr3t --displayname "New User"
+    ```
+
+**Password Management**
+- **Synapse**:
+  - Separate endpoint for password reset
+  - Can optionally log out all devices
+  - Requires admin privileges
+  - Example:
+    ```http
+    POST /_synapse/admin/v1/reset_password/@user:example.com
+    {
+      "new_password": "new_s3cr3t",
+      "logout_devices": true
+    }
+    ```
+
+- **Tuwunel**:
+  - Simple command with optional logout flag
+  - Can be done by user (own account) or admin (any account)
+  - Example:
+    ```
+    !admin users password @user:example.com new_s3cr3t --no-logout
+    ```
+
+**Implementation Notes for Tuwunel**:
+1. The API compatibility layer should:
+   - Map REST endpoints to appropriate room commands
+   - Handle the different response formats
+   - Manage session state for command-response correlation
+   - Implement proper error handling and mapping
+
+2. Authentication flow:
+   - For admin operations, the adapter needs to be in the admin room
+   - May need to handle login/logout flow
+   - Should maintain session state for command tracking
+
+#### 3. Room Management
+
+| Feature | Synapse API | Tuwunel Equivalent | Notes |
+|---------|-------------|---------------------|-------|
+| **List Rooms** | `GET /_synapse/admin/v1/rooms`<br>Parameters:<br>- `from`: Pagination start<br>- `limit`: Max rooms to return<br>- `order_by`: `name`, `canonical_alias`, `joined_members`, `joined_local_members`, `version`, `creator`, `encryption`, `federatable`, `public`, `join_rules`, `guest_access`, `history_visibility`, `state_events`<br>- `search_term`: Filter by room ID or alias<br>- `dir`: `f` (ascending) or `b` (descending) | `!admin rooms list` | **Tuwunel Enhancement Opportunities**:<br>- Add pagination support (`--from`, `--limit`)<br>- Add sorting options (`--order-by=joined_members --dir=desc`)<br>- Add search functionality (`--search=term`) |
+| **Room Details** | `GET /_synapse/admin/v1/rooms/{roomId}`<br>Returns:<br>- Room ID and version<br>- Room state (join rules, guest access, etc.)<br>- Room metadata (creator, encryption, etc.)<br>- Room statistics (events, state events, etc.)<br>- Room state (current state events)<br>- Room members (with pagination) | `!admin rooms show !room:domain` | **Tuwunel Enhancement Opportunities**:<br>- Add detailed member listing<br>- Include room state information<br>- Add room statistics |
+| **Delete Room** | `DELETE /_synapse/admin/v1/rooms/{roomId}`<br>Parameters:<br>- `room_id`: The room ID to delete<br>- `new_room_user_id`: Optional user ID to create a new room and move users there<br>- `room_name`: Name for the new room (if new_room_user_id is set)<br>- `message`: Message to send to the room before deletion | `!admin rooms delete !room:domain` | **Tuwunel Enhancement Opportunities**:<br>- Add option to move users to a new room<br>- Add custom message before deletion |
+| **Purge Room** | `POST /_synapse/admin/v1/purge_room`<br>Body:<br>- `room_id`: The room ID to purge<br>- `delete_local_events`: Whether to purge only local events | `!admin rooms purge !room:domain` | **Tuwunel Enhancement Opportunities**:<br>- Add selective event purging<br>- Add option to preserve certain event types |
+
+##### Room Management Details
+
+**Room List Response Example (Synapse)**:
+```json
+{
+  "offset": 0,
+  "rooms": [
+    {
+      "room_id": "!abc123:example.com",
+      "name": "My Room",
+      "canonical_alias": "#room:example.com",
+      "joined_members": 42,
+      "joined_local_members": 10,
+      "version": "6",
+      "creator": "@user:example.com",
+      "encryption": "m.megolm.v1.aes-sha2",
+      "federatable": true,
+      "public": false,
+      "join_rules": "invite",
+      "guest_access": "can_join",
+      "history_visibility": "shared",
+      "state_events": 1234
+    }
+  ],
+  "total_rooms": 1,
+  "next_batch": 50,
+  "prev_batch": 0
+}
+```
+
+**Tuwunel Enhancement Plan**:
+1. **Room Listing**
+   - Implement pagination with `--from` and `--limit`
+   - Add sorting options with `--order-by` and `--dir`
+   - Add search functionality with `--search`
+
+2. **Room Details**
+   - Expand output to include all relevant room state
+   - Add member listing with pagination
+   - Include room statistics (messages, state events, etc.)
+
+3. **Room Actions**
+   - Add option to move users during room deletion
+   - Add custom messages for room actions
+   - Implement selective event purging
+
+#### 4. Federation
+
+| Feature | Synapse API | Tuwunel Equivalent | Notes |
+|---------|-------------|---------------------|-------|
+| **List Destinations** | `GET /_synapse/admin/v1/federation/destinations`<br>Parameters:<br>- `from`: Pagination start<br>- `limit`: Max destinations to return<br>- `order_by`: `destination`, `retry_last_ts`, `retry_interval`, `failure_ts`, `last_successful_stream_ordering`<br>- `dir`: `f` (ascending) or `b` (descending) | `!admin federation destinations` | **Tuwunel Enhancement Opportunities**:<br>- Add pagination support (`--from`, `--limit`)<br>- Add sorting options (`--order-by=retry_last_ts`)<br>- Add filtering by status (`--status=failing`) |
+| **Destination Details** | `GET /_synapse/admin/v1/federation/destinations/{destination}`<br>Returns:<br>- `destination`: The server name<br>- `failure_ts`: Timestamp of last failure (ms since epoch)<br>- `retry_last_ts`: When the last retry was attempted<br>- `retry_interval`: Current retry interval in ms<br>- `last_successful_stream_ordering`: Stream ordering of last successful send<br>- `pending_pdus`: Number of PDUs waiting to be sent<br>- `pending_edus`: Number of EDUs waiting to be sent | `!admin federation show example.org` | **Tuwunel Enhancement Opportunities**:<br>- Add detailed queue information<br>- Include recent error messages<br>- Add connection statistics |
+| **Reset Connection** | `POST /_synapse/admin/v1/federation/destinations/{destination}/reset_connection`<br>Parameters:<br>- `retry_last_ts`: Optional timestamp to set for last retry attempt<br>- `retry_interval`: Optional interval to set for next retry<br>- `failure_ts`: Optional timestamp to set for last failure | `!admin federation reset example.org` | **Tuwunel Enhancement Opportunities**:<br>- Add options to set retry parameters<br>- Add force reconnect option |
+
+##### Federation Details
+
+**Destination List Response Example (Synapse)**:
+```json
+{
+  "destination": "example.org",
+  "failure_ts": 1640995200000,
+  "retry_last_ts": 1641081600000,
+  "retry_interval": 3600000,
+  "last_successful_stream_ordering": 12345678,
+  "pending_pdus": 5,
+  "pending_edus": 2
+}
+```
+
+**Tuwunel Enhancement Plan**:
+1. **Destination Listing**
+   - Implement pagination with `--from` and `--limit`
+   - Add sorting options (`--order-by=failure_ts --dir=desc`)
+   - Add filtering by status (`--status=failing`)
+
+2. **Connection Management**
+   - Add detailed error information in `show` command
+   - Include queue statistics (PDUs/EDUs waiting)
+   - Show last successful sync information
+
+3. **Troubleshooting**
+   - Add command to view recent federation transactions
+   - Implement federation send queue inspection
+   - Add federation send retry controls
+
+#### 5. Appservices
+
+| Feature | Synapse API | Tuwunel Equivalent | Notes |
+|---------|-------------|---------------------|-------|
+| **Register Appservice** | `POST /_synapse/admin/v1/appservices`<br>Body: Full appservice registration YAML | `!admin appservices register [yaml]` | **Tuwunel Enhancement Opportunities**:<br>- Support YAML input from file or stdin<br>- Add validation of registration data<br>- Generate appservice tokens automatically |
+| **List Appservices** | `GET /_synapse/admin/v1/appservices`<br>Returns:<br>- `appservices`: Array of registered appservices<br>- `total`: Total number of appservices | `!admin appservices list` | **Tuwunel Enhancement Opportunities**:<br>- Add detailed output format<br>- Include status information (online/offline)<br>- Show last activity timestamp |
+| **Get Appservice** | `GET /_synapse/admin/v1/appservices/{appserviceId}`<br>Returns full appservice configuration | `!admin appservices show <name>` | **Tuwunel Enhancement Opportunities**:<br>- Add detailed status information<br>- Include connection statistics<br>- Show recent errors |
+| **Update Appservice** | `PUT /_synapse/admin/v1/appservices/{appserviceId}`<br>Body: Updated appservice configuration | `!admin appservices update <name> [yaml]` | **Tuwunel Enhancement Opportunities**:<br>- Support partial updates<br>- Add dry-run option<br>- Validate configuration before applying |
+| **Delete Appservice** | `DELETE /_synapse/admin/v1/appservices/{appserviceId}` | `!admin appservices unregister <name> [--purge]` | **Tuwunel Enhancement Opportunities**:<br>- Add confirmation prompt<br>- Add --force flag to skip confirmation<br>- Add --purge option to clean up data |
+
+##### Appservices Details
+
+**Appservice Registration Example (Synapse)**:
+```yaml
+id: "my_appservice"
+url: "http://my-appservice:8000"
+as_token: "your_as_token"
+hs_token: "your_hs_token"
+sender_localpart: "_appservice"
+namespaces:
+  users:
+    - exclusive: true
+      regex: "@_appservice\\.(.*)"
+  aliases: []
+  rooms: []
+```
+
+**Tuwunel Enhancement Plan**:
+1. **Registration & Management**
+   - Support YAML input from files or direct input
+   - Add validation for required fields
+   - Generate secure tokens if not provided
+
+2. **Status Monitoring**
+   - Track appservice connection status
+   - Monitor message queue sizes
+   - Log and display recent errors
+
+3. **Advanced Features**
+   - Rate limiting configuration
+   - Connection timeouts and retries
+   - Webhook URL management
+
+##### Implementation Notes
+
+1. **Authentication**
+   - Synapse uses the `as_token` for authenticating appservice requests
+   - Tuwunel should maintain compatibility with this authentication method
+   - Consider adding additional authentication methods (JWT, etc.)
+
+2. **Rate Limiting**
+   - Synapse has built-in rate limiting for appservices
+   - Tuwunel should implement similar controls
+   - Consider per-appservice rate limiting
+
+3. **Error Handling**
+   - Detailed error responses for configuration issues
+   - Logging for failed requests
+   - Retry mechanisms for transient failures
+
+### Required API Layer for Tuwunel
+
+To make Synapse Admin work with Tuwunel, we need to implement an API compatibility layer that:
+
+1. **Translates REST API calls** to Tuwunel's room commands
+2. **Maintains session state** with the Tuwunel admin room
+3. **Handles authentication** using Tuwunel's admin room access
+4. **Transforms responses** to match Synapse's API format
+
+Example implementation approach:
+
+```typescript
+// Pseudo-code for Tuwunel API adapter
+class TuwunelAdminAdapter {
+  private adminRoomId: string;
+  private client: MatrixClient;
+  
+  async listUsers(params: any) {
+    const response = await this.client.sendMessage(this.adminRoomId, {
+      msgtype: 'm.text',
+      body: '!admin users list'
+    });
+    
+    // Parse response and transform to Synapse format
+    return {
+      users: response.users.map(user => ({
+        name: user.user_id,
+        displayname: user.display_name,
+        // ... other fields
+      })),
+      total: response.total
+    };
+  }
+  
+  // Implement other methods...
+}
+```
+
+### Implementation Considerations
+
+1. **Real-time vs Request-Response**
+   - Synapse uses HTTP request-response
+   - Tuwunel uses Matrix events which are asynchronous
+   - Need to implement request correlation to match commands with responses
+
+2. **Authentication**
+   - Synapse uses access tokens
+   - Tuwunel uses Matrix client authentication and admin room membership
+   - Need to handle Matrix login and maintain session
+
+3. **Rate Limiting**
+   - Synapse has built-in rate limiting
+   - Tuwunel may have different limits on room commands
+   - Implement appropriate queuing and backoff
+
+4. **Error Handling**
+   - Map Tuwunel error messages to appropriate HTTP status codes
+   - Handle timeouts and network issues gracefully
+
+### Response Format
+
+Tuwunel's API responses should match Synapse's format. For example:
+
+```typescript
+// User list response
+{
+  "users": [
+    {
+      "name": "@user:example.com",
+      "displayname": "User Name",
+      "is_guest": 0,
+      "admin": 0,
+      "deactivated": 0,
+      // ... other fields
+    }
+  ],
+  "total": 1
+}
+```
+
+## Admin UI Modifications
+
+### 1. Data Provider Updates
+
+Update `/src/synapse/dataProvider.ts` to handle Tuwunel's API responses:
+
+```typescript
+// Example modification for user listing
+const resourceMap = {
+  users: {
+    path: "/_synapse/admin/v2/users",
+    map: (user: any) => ({
+      id: user.name,
+      ...user,
+      // Add any necessary transformations here
+    }),
+    // ... rest of the config
+  }
+  // Update other resources similarly
+};
+```
+
+### 2. Authentication
+
+If Tuwunel uses a different authentication mechanism, update `/src/synapse/authProvider.ts`:
+
+```typescript
+// Example auth provider modification
+const authProvider = {
+  login: async ({ username, password }: { username: string; password: string }) => {
+    // Tuwunel-specific login logic
+    const response = await fetch(`${tuwunelUrl}/_tuwunel/admin/v1/login`, {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    // Handle response and store token
+  },
+  // ... other auth methods
+};
+```
+
+### 3. Configuration
+
+Update the configuration to support Tuwunel-specific options:
+
+```typescript
+// config.ts
+export interface Config {
+  tuwunel: {
+    apiUrl: string;
+    authMethod?: 'token' | 'basic';
+    // Add Tuwunel-specific options
+  };
+  // Keep Synapse config for backward compatibility
+  synapse?: {
+    homeserverUrl: string;
+    // ...
+  };
+}
+```
+
+## Configuration Changes
+
+### Environment Variables
+
+Update `.env` or your deployment configuration:
+
+```ini
+# Tuwunel configuration
+VITE_TUWUNEL_API_URL=https://your-tuwunel-server
+VITE_TUWUNEL_AUTH_METHOD=token
+
+# Optional: Fallback to Synapse
+VITE_SYNAPSE_HOMESERVER_URL=
+```
+
+### Feature Flags
+
+Add feature flags for Tuwunel-specific functionality:
+
+```typescript
+// features.ts
+export const features = {
+  enableTuwunel: import.meta.env.VITE_ENABLE_TUWUNEL === 'true',
+  // ... other features
+};
+```
+
+## Testing Strategy
+
+### Unit Tests
+
+Update tests to work with Tuwunel's API responses:
+
+```typescript
+// __tests__/dataProvider.test.ts
+describe('Tuwunel Data Provider', () => {
+  it('should transform user list response', () => {
+    const tuwunelResponse = {
+      users: [
+        { name: '@user:example.com', displayname: 'User' }
+      ],
+      total: 1
+    };
+    // Test transformation logic
+  });
+});
+```
+
+### Integration Tests
+
+Test against a Tuwunel instance:
+
+1. Set up a test Tuwunel instance
+2. Run end-to-end tests
+3. Verify all admin features work as expected
+
+## Deployment
+
+### Build Configuration
+
+Update build scripts to include Tuwunel-specific configurations:
+
+```json
+// package.json
+{
+  "scripts": {
+    "build:tuwunel": "vite build --mode tuwunel",
+    "start:tuwunel": "vite --mode tuwunel"
+  }
+}
+```
+
+### Docker Configuration
+
+Update Docker configuration for Tuwunel:
+
+```dockerfile
+# Dockerfile
+FROM node:18 as build
+
+# Install dependencies
+COPY package.json yarn.lock ./
+RUN yarn install
+
+# Copy source
+COPY . .
+
+# Build for Tuwunel
+RUN yarn build:tuwunel
+
+# Production image
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **API Response Mismatch**
+   - Verify Tuwunel's API responses match Synapse's format
+   - Check browser console for errors
+
+2. **Authentication Failures**
+   - Verify authentication method in configuration
+   - Check CORS settings on Tuwunel server
+
+3. **Missing Features**
+   - Some Synapse-specific features might not be available in Tuwunel
+   - Implement workarounds or disable features as needed
+
+## Contributing
+
+When contributing to the Tuwunel compatibility layer:
+
+1. Follow the existing code style
+2. Add tests for new functionality
+3. Document any Tuwunel-specific behavior
+4. Update this migration guide as needed
+
+## License
+
+[Your License Information]
+
+---
+*Last updated: July 2025*

@@ -1831,3 +1831,16 @@
 # A regular expression defining which values this namespace includes.
 #
 #regex =
+
+#[[admin_api]>]]
+
+# Enable the providing of an API for admin request functionality.
+#
+#enabled = false
+
+# The prefix used for the API. The existing one provided by Synapse looks like this:
+# GET /_synapse/admin/v2/users/{userId}
+# To make it neutral in future, it might be "_matrix"
+# If the admin API is enabled, a value is needed.
+#
+#api_prefix =

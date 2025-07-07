@@ -286,7 +286,7 @@ Example implementation approach.
 
 ### Implementation Considerations
 
-**Core Requirements** are listed here as a starting point. These are based on initially evaluated differences between Synapse and Tuwunel, considering also infromation from the previous chapters:
+**Core Requirements** are listed here as a starting point. These are based on initially evaluated differences between Synapse and Tuwunel, considering also information from the previous chapters:
 
 1. **Real-time vs Request-Response**
     - Synapse uses HTTP request-response
@@ -401,7 +401,7 @@ This chapter gives an overview about the tasks & todos to be done and how these 
 | State | ID | Description                                                            |
 |-------|----|------------------------------------------------------------------------|
 | :✅:   | 01 | Document initial approach for including Synapse Admin API into Tuwunel |
-|       |    |                                                                        |
+| :✅:   | 02 | Adopt configuration file for Admin API settings                        |
 
 
 ---

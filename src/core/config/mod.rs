@@ -25,11 +25,7 @@ use url::Url;
 
 use self::proxy::ProxyConfig;
 pub use self::{check::check, manager::Manager};
-use crate::{
-	Result, err,
-	error::Error,
-	utils::{string::EMPTY, sys},
-};
+use crate::{Result, err, error::Error, utils::{string::EMPTY, sys}};
 
 /// All the config options for tuwunel.
 #[allow(clippy::struct_excessive_bools)]
@@ -66,7 +62,7 @@ pub struct Config {
 	/// See the docs for reverse proxying and delegation:
 	/// https://tuwunel.chat/deploying/generic.html#setting-up-the-reverse-proxy
 	///
-	/// Also see the `[global.well_known]` config section at the very bottom.
+	/// Also, see the `[global.well_known]` config section at the very bottom.
 	///
 	/// Examples of delegation:
 	/// - https://matrix.org/.well-known/matrix/server
@@ -155,7 +151,7 @@ pub struct Config {
 	/// example: "/opt/tuwunel-db-backups"
 	pub database_backup_path: Option<PathBuf>,
 
-	/// The amount of online RocksDB database backups to keep/retain, if using
+	/// The number of online RocksDB database backups to keep/retain, if using
 	/// "database_backup_path", before deleting the oldest one.
 	///
 	/// default: 1
@@ -731,7 +727,7 @@ pub struct Config {
 	/// specifically on room joins. This option limits the exposure to a
 	/// compromised trusted server to room joins only. The join operation
 	/// requires gathering keys from many origin servers which can cause
-	/// significant delays. Therefor this defaults to true to mitigate
+	/// significant delays. Therefore this defaults to true to mitigate
 	/// unexpected delays out-of-the-box. The security-paranoid or those willing
 	/// to tolerate delays are advised to set this to false. Note that setting
 	/// query_trusted_key_servers_first to true causes this option to be
@@ -742,7 +738,7 @@ pub struct Config {
 	/// Only query trusted servers for keys and never the origin server. This is
 	/// intended for clusters or custom deployments using their trusted_servers
 	/// as forwarding-agents to cache and deduplicate requests. Notary servers
-	/// do not act as forwarding-agents by default, therefor do not enable this
+	/// do not act as forwarding-agents by default, therefore, do not enable this
 	/// unless you know exactly what you are doing.
 	#[serde(default)]
 	pub only_query_trusted_key_servers: bool,
@@ -1825,6 +1821,10 @@ pub struct Config {
 
 	// external structure; separate section
 	#[serde(default)]
+	pub admin_api: AdminApiConfig,
+
+	// external structure; separate section
+	#[serde(default)]
 	pub appservice: BTreeMap<String, AppService>,
 
 	#[serde(flatten)]
@@ -2207,6 +2207,39 @@ pub struct AppServiceNamespace {
 	/// A regular expression defining which values this namespace includes.
 	pub regex: String,
 }
+
+/// Settings used for controlling the Admin API for legacy Synapse requests
+#[derive(Clone, Debug, Default, Deserialize)]
+#[config_example_generator(
+	filename = "tuwunel-example.toml",
+	section = "[admin_api]"
+)]
+pub struct AdminApiConfig {
+	/// Enable the providing of an API for admin request functionality.
+	#[serde(default)]
+	pub enabled: bool,
+
+	/// The prefix used for the API. The existing one provided by Synapse looks like this:
+	/// GET /_synapse/admin/v2/users/{userId}, leading tu prefix '/_synapse/admin/v2/'
+	/// To make it neutral in the future, it might be '/_matrix/admin/v2/'
+	/// If the admin API is enabled, a value is needed.
+	/// Currently no validation for the allowed values is implemented. This can be evaluated if the
+	#[serde(default = "default_api_prefix")]
+	pub api_prefix: String,
+
+	/// Timeout (in seconds) for awaiting Matrix admin command responses.
+	#[serde(default = "default_api_timeout")]
+	pub timeout_secs: u64,
+
+	/// Maximum number of retries for failed admin commands.
+	#[serde(default = "default_api_retries")]
+	pub max_retries: u8,
+}
+
+fn default_api_prefix() -> String { "/_synapse/admin/v2".to_string() }
+fn default_api_timeout() -> u64 { 10 }
+fn default_api_retries() -> u8 { 2 }
+
 
 impl From<AppServiceNamespace> for ruma::api::appservice::Namespace {
 	fn from(conf: AppServiceNamespace) -> Self {

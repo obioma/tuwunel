@@ -4,35 +4,139 @@ This document outlines the steps required to adapt the Synapse Admin UI to work 
 
 ## Table of Contents
 1. [Overview](#overview)
-2. [Tuwunel Adaptations](#tuwunel-adaptations)
-3. [Admin UI Modifications](#admin-ui-modifications)
-4. [Configuration Changes](#configuration-changes)
-5. [Testing Strategy](#testing-strategy)
-6. [Deployment](#deployment)
-7. [Contributing](#contributing)
-8. [License](#license)
-9. [Appendix: Asynchronous Handling, Error Mapping, and Limitations](#appendix-asynchronous-handling-error-mapping-and-limitations)
-10. [Appendix: Todos (CR)](#appendix-todos-cr)
+2. [Admin UI Modifications](#admin-ui-modifications)
+3. [Configuration Changes](#configuration-changes)
+4. [Testing Strategy](#testing-strategy)
+5. [Deployment](#deployment)
+6. [Contributing](#contributing)
+7. [License](#license)
+8. [Appendix: Asynchronous Handling, Error Mapping, and Limitations](#appendix-asynchronous-handling-error-mapping-and-limitations)
 
 
-## Overview
+# Overview
 
 Synapse Admin is designed to work with Synapse's Admin API. To make it compatible with Tuwunel, we need to:
 1. Ensure Tuwunel implements compatible Admin API endpoints
 2. Modify the Admin UI to work with Tuwunel's API responses
 3. Update authentication and configuration
 
-## Tuwunel Adaptations
+# Admin Functionality Comparison
 
-### Admin Functionality Comparison
+Tuwunel implements admin functionality differently from Synapse's REST API approach. Here's a comparison of how admin features are implemented in both systems. The reference for Synapse is mainly from [Synapse—The Admin API](https://element-hq.github.io/synapse/latest/usage/administration/admin_api/index.html). The Synapse documentation is also providing the sequence for the functionalities compared. Note that not the complete description is referenced, rather the ones understood as relevant for the tasks ahead.
 
-Tuwunel implements admin functionality differently from Synapse's REST API approach. Here's a comparison of how admin features are implemented in both systems:
+## 1. Authenticate as a server admin
 
-#### 1. Access Method
-- **Synapse**: Uses RESTful HTTP API endpoints under `/_synapse/admin/v1/`
-- **Tuwunel**: Uses Matrix room commands in the `#admins` room
+### Synapse
 
-#### 2. User Management
+Many of the API calls in the admin api will require an access_token for a server admin. Note that a server admin is distinct from a room admin.
+
+An existing user can be marked as a server admin by updating the database directly.
+
+
+### Tuwunel
+
+In Tuwunel a user can be given admin privileges for the server by using the command the admin console /which can be activated either server side 
+```
+admin users make-user-admin <user-ID>
+```
+or as commands in the `#admin` rooms for a given server.
+```
+!admin users make-user-admin <user-ID>
+```
+
+
+### Conclusion
+
+While the basic functionality is the same, in Synapse it is not via the Admin API. Thus, there is currently no need for any activities in this respect.
+
+## 2. Access Method
+
+### Synapse
+
+- Uses RESTful HTTP API endpoints under `/_synapse/admin/v1/`
+- Uses HTTP request-response
+
+### Tuwunel
+
+- Uses Matrix room commands in the `#admins` room. 
+- Uses Matrix events which are asynchronous
+
+### Conclusion
+
+There must be a kind of generic **API compatibility layer** allowing to access via the API. It **must**:
+- **Real-time vs Request-Response**. Map REST endpoints to appropriate Tuwunel commands. **Translates REST API calls** to Tuwunel's room commands. All REST requests must issue a corresponding Matrix command with a unique correlation tag
+- Handle the different response formats, including error mapping (see [Appendix](#error-mapping-table)) **Transforms responses** to match Synapse's API format. **Implements async request/response correlation** via UUIDs/tags in both commands and responses
+- Manage session state for command-response correlation: **Maintains session state** with the Tuwunel admin room. 
+- **Maps errors** and handles timeouts (see [Appendix](#error-mapping-table)). Implement robust error handling, including timeouts and retries.
+- Provide clear user feedback for long-running or failed commands.
+
+#### Error Mapping Table
+
+| Tuwunel Error Text               | HTTP Status | Example Synapse Error Code | Notes                        |
+|----------------------------------|-------------|----------------------------|------------------------------|
+| "Permission denied"              | 403         | M_FORBIDDEN                | Not admin or not in room     |
+| "User not found"                 | 404         | M_NOT_FOUND                |                              |
+| "Malformed command"              | 400         | M_BAD_JSON                 |                              |
+| "Timeout waiting for response"   | 504         | M_LIMIT_EXCEEDED           | Retryable error              |
+| "Internal error"                 | 500         | M_UNKNOWN                  |                              |
+
+#### Asynchronous Handling
+
+All admin operations via Matrix are asynchronous. The compatibility layer must:
+
+  - Attach a unique correlation tag/UUID to every command issued.
+  - Track all outstanding requests, matching them to received responses via the tag.
+  - Implement a configurable timeout (e.g. 10 seconds); if the timeout expires, return HTTP 504 to the client.
+  - Allow for retries or cancellation if a request fails or is not acknowledged.
+
+#### Rate Limiting
+  - Synapse has built-in rate limiting
+  - Tuwunel may have different limits on room commands
+
+   **Requirement**: Implement appropriate queuing and backoff
+
+## 3. Authentication
+
+### Synapse
+
+Requires explicit authentication details. It supports different authentication types (password, SSO, application service, OAuth), in the end access tokens.
+Additionally, Synapse uses the `as_token` for authenticating `appservice` requests.
+
+Note that Synapses session management, or at least the login identification and authentification are potentially different, allowing other flows. This needs to be evaluated and considered.
+
+### Tuwunel
+The assumption is that the authentication happens not at all when starting the admin console on the server directly or takes either place once, when entering the admin room (Tuwunel uses Matrix client authentication and admin room membership).
+
+### Conclusion
+- Tuwunel should maintain compatibility with this authentication method
+- Consider adding additional authentication methods (JWT, etc.)
+- **Handles authentication** using Tuwunel's admin room access
+
+**Authentication flow**
+- The adapter requires membership in the admin room
+- Session management must consider either persistent client sessions or service-account usage.
+- Support token refresh and fallback if admin room access is lost
+
+**Session and Authentication**
+- The adapter may use a persistent Matrix client session (recommended) or a service account.
+- Admin room membership must be checked on startup and at regular intervals.
+- If the session is lost, return HTTP 503 or prompt for re-authentication.
+
+
+
+
+    
+## 4. Feature Limitations
+
+- Tuwunel may not fully support some advanced Synapse features.
+- Unsupported features should be clearly flagged in the UI and API with HTTP 501 or a similar error.
+- Always document known gaps and update this plan as new features are added.
+
+# Object Details
+
+Different classes of objects have different implementations, both in Synapse but also in Tuwunel. Here these differences will be detailed out.
+
+## 1. User Management
 
 | Feature             | Synapse API                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Tuwunel Equivalent                                                                           | Notes                                                                                                                                                                       |
 |---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -44,7 +148,7 @@ Tuwunel implements admin functionality differently from Synapse's REST API appro
 | **Reset Password**  | `POST /_synapse/admin/v1/reset_password/{userId}`<br>Body: `{ "new_password": "...", "logout_devices": bool }`                                                                                                                                                                                                                                                                                                                                                  | `!admin users password @user:domain newpassword [--no-logout]`                               | Both support optional device session invalidation                                                                                                                           |
 | **User Login**      | N/A (Handled by client)                                                                                                                                                                                                                                                                                                                                                                                                                                         | `!admin users login @user:domain [device_id]`                                                | Tuwunel allows admin-issued login tokens                                                                                                                                    |
 
-##### Detailed Comparison:
+### Detailed Comparison:
 
 **User Creation**
 - **Synapse**:
@@ -93,23 +197,7 @@ Tuwunel implements admin functionality differently from Synapse's REST API appro
       !admin users password @user:example.com new_s3cr3t --no-logout
       ```
 
-**Implementation Notes for Tuwunel** (Improved):
-1. The API compatibility layer **must**:
-    - Map REST endpoints to appropriate **Tuwunel** commands
-    - Handle the different response formats, including error mapping (see [Appendix](#error-mapping-table))
-    - Manage session state for command-response correlation
-    - Implement robust error handling, including timeouts and retries
-    - Provide clear user feedback for long-running or failed commands
-
-2. Authentication flow:
-    - The adapter requires membership in the admin room
-    - Session management must consider either persistent client sessions or service-account usage. 
-    - Support token refresh and fallback if admin room access is lost
-    
-   Note that Synapses session management, or at least the login identification and authentification are potentially different, allowing other flows. This needs to be evaluated and considered.
-     
-
-#### 3. Room Management
+## 2. Room Management
 
 | Feature          | Synapse API                                                                                                                                                                                                                                                                                                                                                                                                                        | Tuwunel Equivalent                 | Notes                                                                                                                                                                                                      |
 |------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -118,7 +206,7 @@ Tuwunel implements admin functionality differently from Synapse's REST API appro
 | **Delete Room**  | `DELETE /_synapse/admin/v1/rooms/{roomId}`<br>Parameters:<br>- `room_id`: The room ID to delete<br>- `new_room_user_id`: Optional user ID to create a new room and move users there<br>- `room_name`: Name for the new room (if new_room_user_id is set)<br>- `message`: Message to send to the room before deletion                                                                                                               | `!admin rooms delete !room:domain` | **Tuwunel Enhancement Opportunities**:<br>- Add option to move users to a new room<br>- Add custom message before deletion                                                                                 |
 | **Purge Room**   | `POST /_synapse/admin/v1/purge_room`<br>Body:<br>- `room_id`: The room ID to purge<br>- `delete_local_events`: Whether to purge only local events                                                                                                                                                                                                                                                                                  | `!admin rooms purge !room:domain`  | **Tuwunel Enhancement Opportunities**:<br>- Add selective event purging<br>- Add option to preserve certain event types                                                                                    |
 
-##### Room Management Details
+### Room Management Details
 
 **Room List Response Example (Synapse)**:
 ```json
@@ -166,7 +254,7 @@ Tuwunel implements admin functionality differently from Synapse's REST API appro
 
 Note that all async commands must be correlated and timeouts handled.
 
-#### 4. Federation
+## 3. Federation
 
 | Feature                 | Synapse API                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Tuwunel Equivalent                    | Notes                                                                                                                                                                                            |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -174,7 +262,7 @@ Note that all async commands must be correlated and timeouts handled.
 | **Destination Details** | `GET /_synapse/admin/v1/federation/destinations/{destination}`<br>Returns:<br>- `destination`: The server name<br>- `failure_ts`: Timestamp of last failure (ms since epoch)<br>- `retry_last_ts`: When the last retry was attempted<br>- `retry_interval`: Current retry interval in ms<br>- `last_successful_stream_ordering`: Stream ordering of last successful send<br>- `pending_pdus`: Number of PDUs waiting to be sent<br>- `pending_edus`: Number of EDUs waiting to be sent | `!admin federation show example.org`  | **Tuwunel Enhancement Opportunities**:<br>- Add detailed queue information<br>- Include recent error messages<br>- Add connection statistics                                                     |
 | **Reset Connection**    | `POST /_synapse/admin/v1/federation/destinations/{destination}/reset_connection`<br>Parameters:<br>- `retry_last_ts`: Optional timestamp to set for last retry attempt<br>- `retry_interval`: Optional interval to set for next retry<br>- `failure_ts`: Optional timestamp to set for last failure                                                                                                                                                                                    | `!admin federation reset example.org` | **Tuwunel Enhancement Opportunities**:<br>- Add options to set retry parameters<br>- Add force reconnect option                                                                                  |
 
-##### Federation Details
+### Federation Details
 
 **Destination List Response Example (Synapse)**:
 ```json
@@ -207,7 +295,7 @@ Note that all async commands must be correlated and timeouts handled.
 
 Note that all async commands must be correlated and timeouts handled.
 
-#### 5. Appservices
+## 4. Appservices
 
 | Feature                 | Synapse API                                                                                                                                    | Tuwunel Equivalent                               | Notes                                                                                                                                                                    |
 |-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -217,7 +305,7 @@ Note that all async commands must be correlated and timeouts handled.
 | **Update Appservice**   | `PUT /_synapse/admin/v1/appservices/{appserviceId}`<br>Body: Updated appservice configuration                                                  | `!admin appservices update <name> [yaml]`        | **Tuwunel Enhancement Opportunities**:<br>- Support partial updates<br>- Add dry-run option<br>- Validate configuration before applying                                  |
 | **Delete Appservice**   | `DELETE /_synapse/admin/v1/appservices/{appserviceId}`                                                                                         | `!admin appservices unregister <name> [--purge]` | **Tuwunel Enhancement Opportunities**:<br>- Add confirmation prompt<br>- Add --force flag to skip confirmation<br>- Add --purge option to clean up data                  |
 
-##### Appservices Details
+### Appservices Details
 
 **Appservice Registration Example (Synapse)**:
 ```yaml
@@ -250,71 +338,23 @@ namespaces:
     - Connection timeouts and retries
     - Webhook URL management
 
-##### Implementation Notes
+### Implementation Notes
 
-1. **Authentication**
-    - Synapse uses the `as_token` for authenticating appservice requests
-    - Tuwunel should maintain compatibility with this authentication method
-    - Consider adding additional authentication methods (JWT, etc.)
-
-2. **Rate Limiting**
+1. **Rate Limiting**
     - Synapse has built-in rate limiting for appservices
     - Tuwunel should implement similar controls
     - Consider per-appservice rate limiting
 
-3. **Error Handling**
+2. **Error Handling**
     - Detailed error responses for configuration issues
     - Logging for failed requests
     - Retry mechanisms for transient failures
 
 Note that all async commands must be correlated and timeouts handled.
 
-### Required API Layer for Tuwunel
-
-To make Synapse Admin work with Tuwunel, we need to implement an API compatibility layer that:
-
-1. **Translates REST API calls** to Tuwunel's room commands
-2. **Maintains session state** with the Tuwunel admin room
-3. **Handles authentication** using Tuwunel's admin room access
-4. **Transforms responses** to match Synapse's API format
-5. **Implements async request/response correlation** via UUIDs/tags in both commands and responses
-6. **Maps errors** and handles timeouts (see [Appendix](#error-mapping-table))
-
-Example implementation approach.
-
-### Implementation Considerations
-
-**Core Requirements** are listed here as a starting point. These are based on initially evaluated differences between Synapse and Tuwunel, considering also information from the previous chapters:
-
-1. **Real-time vs Request-Response**
-    - Synapse uses HTTP request-response
-    - Tuwunel uses Matrix events which are asynchronous
-    
-    **Requirement**: All REST requests must issue a corresponding Matrix command with a unique correlation tag.
-
-2. **Authentication**
-    - Synapse uses access tokens
-    - Tuwunel uses Matrix client authentication and admin room membership
-
-    **Requirement**: All Matrix events from the admin room must be tracked and matched to outstanding requests.
-
-    **Requirement**: Handle Matrix login and maintain session data
-
-3. **Rate Limiting**
-    - Synapse has built-in rate limiting
-    - Tuwunel may have different limits on room commands
-
-    **Requirement**: Implement appropriate queuing and backoff
-
-4. **Error Handling**
-    - Map Tuwunel error messages to appropriate HTTP status codes
-    - Handle timeouts and network issues gracefully
-
-   **Requirement**: Timeouts, retries, and user-facing error messages are required for all flows.
-
 ## Admin UI Modifications
 
-(Unchanged, but recommends surfacing pending and failed async operations clearly to the user.)
+Unchanged, but recommends surfacing pending and failed async operations clearly to the user.
 
 ## Configuration Changes
 
@@ -324,7 +364,7 @@ Example implementation approach.
 
 ### Feature Flags
 
-(Unchanged, but includes flags for features currently unsupported by Tuwunel.)
+Unchanged but includes flags for features currently unsupported by Tuwunel.
 
 ## Testing Strategy
 
@@ -357,35 +397,7 @@ When contributing to the Tuwunel compatibility layer:
 
 ## Appendix: Asynchronous Handling, Error Mapping, and Limitations
 
-### Asynchronous Handling
 
-- All admin operations via Matrix are asynchronous. The compatibility layer must:
-    - Attach a unique correlation tag/UUID to every command issued.
-    - Track all outstanding requests, matching them to received responses via the tag.
-    - Implement a configurable timeout (e.g. 10 seconds); if the timeout expires, return HTTP 504 to the client.
-    - Allow for retries or cancellation if a request fails or is not acknowledged.
-
-### Error Mapping Table
-
-| Tuwunel Error Text               | HTTP Status | Example Synapse Error Code | Notes                        |
-|----------------------------------|-------------|----------------------------|------------------------------|
-| "Permission denied"              | 403         | M_FORBIDDEN                | Not admin or not in room     |
-| "User not found"                 | 404         | M_NOT_FOUND                |                              |
-| "Malformed command"              | 400         | M_BAD_JSON                 |                              |
-| "Timeout waiting for response"   | 504         | M_LIMIT_EXCEEDED           | Retryable error              |
-| "Internal error"                 | 500         | M_UNKNOWN                  |                              |
-
-### Feature Limitations
-
-- Some advanced Synapse features may not be fully supported by Tuwunel.
-- Unsupported features should be clearly flagged in the UI and API with HTTP 501 or a similar error.
-- Always document known gaps and update this plan as new features are added.
-
-### Session and Authentication
-
-- The adapter may use a persistent Matrix client session (recommended) or a service account.
-- Admin room membership must be checked on startup and at regular intervals.
-- If the session is lost, return HTTP 503 or prompt for re-authentication.
 
 ### Test Infrastructure
 
@@ -396,11 +408,18 @@ When contributing to the Tuwunel compatibility layer:
 
 This chapter gives an overview about the tasks & todos to be done and how these are split into local Cr and git commits
 
-| State | ID | Description                                                            |
-|-------|----|------------------------------------------------------------------------|
-| :✅:   | 01 | Document initial approach for including Synapse Admin API into Tuwunel |
-| :✅:   | 02 | Adopt configuration file for Admin API settings                        |
+- [x] 01 Document initial approach for including Synapse Admin API in Tuwunel
+- [X] 02 Adopt configuration file for Admin API settings
+- [ ] 03 Describe Synapse Admin features in details, to have a base for starting
+- [ ] 04
+- [ ] 05
+- [ ] 06
+- [ ] 07
+- [ ] 08
 
+## Appendix: Footnotes and References
+
+[¹] Synapse Admin documentation https://github.com/matrix-org/synapse/tree/develop/docs/usage/administration/admin_api
 
 ---
 *Last updated: July 2025*

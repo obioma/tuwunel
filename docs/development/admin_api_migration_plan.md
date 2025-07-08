@@ -34,8 +34,6 @@ Tuwunel implements admin functionality differently from Synapse's REST API appro
 
 #### 2. User Management
 
-#### 2. User Management
-
 | Feature             | Synapse API                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Tuwunel Equivalent                                                                           | Notes                                                                                                                                                                       |
 |---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **List Users**      | `GET /_synapse/admin/v2/users`<br>Parameters: <br>- `from`: Pagination start<br>- `limit`: Max users to return<br>- `guests`: Include guest users<br>- `deactivated`: Include deactivated users<br>- `name`: Search by name/localpart                                                                                                                                                                                                                           | `!admin users list [--deactivated]`                                                          | **Tuwunel Enhancement Opportunities**:<br>- Add pagination support (`--from`, `--limit`)<br>- Add guest user filtering (`--include-guests`)<br>- Add search functionality   |
@@ -98,7 +96,7 @@ Tuwunel implements admin functionality differently from Synapse's REST API appro
 **Implementation Notes for Tuwunel** (Improved):
 1. The API compatibility layer **must**:
     - Map REST endpoints to appropriate **Tuwunel** commands
-    - Handle the different response formats, including error mapping (see [Appendix](#docs/development/admin_api_migration_plan.md:346))
+    - Handle the different response formats, including error mapping (see [Appendix](#error-mapping-table))
     - Manage session state for command-response correlation
     - Implement robust error handling, including timeouts and retries
     - Provide clear user feedback for long-running or failed commands
@@ -280,7 +278,7 @@ To make Synapse Admin work with Tuwunel, we need to implement an API compatibili
 3. **Handles authentication** using Tuwunel's admin room access
 4. **Transforms responses** to match Synapse's API format
 5. **Implements async request/response correlation** via UUIDs/tags in both commands and responses
-6. **Maps errors** and handles timeouts (see [Appendix](#docs/development/admin_api_migration_plan.md:346))
+6. **Maps errors** and handles timeouts (see [Appendix](#error-mapping-table))
 
 Example implementation approach.
 

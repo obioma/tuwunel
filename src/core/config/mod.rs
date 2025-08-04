@@ -1209,7 +1209,7 @@ pub struct Config {
 	pub rocksdb_stats_level: u8,
 
 	/// This is a password that can be configured that will let you login to the
-	/// server bot account (currently `@conduit`) for emergency troubleshooting
+	/// server bot account (`@tuwunel`) for emergency troubleshooting
 	/// purposes such as recovering/recreating your admin room, or inviting
 	/// yourself back.
 	///
